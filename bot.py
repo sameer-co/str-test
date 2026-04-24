@@ -1,5 +1,3 @@
-TELEGRAM_TOKEN = '8392707199:AAHjWHGLoZ3Udm4rS5JlgSaPLez1qZbHMOo'
-CHAT_ID = '1950462171'
 """
 MON/USDC — RSI(40) × WMA(15) Crossover Strategy
 Timeframe : 1-minute
@@ -38,59 +36,96 @@ load_dotenv()  # optional: load TELEGRAM_TOKEN and TELEGRAM_CHAT_ID from .env
 # ══════════════════════════════════════════════
 # ⚙️  CONFIGURATION  — edit these
 # ══════════════════════════════════════════════
-TELEGRAM_TOKEN = '8392707199:AAHjWHGLoZ3Udm4rS5JlgSaPLez1qZbHMOo'
-CHAT_ID = '1950462171'
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN",   "YOUR_BOT_TOKEN_HERE")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
+
 SYMBOL        = "MON/USDC"
 TIMEFRAME     = "1m"
 RSI_LENGTH    = 40
 WMA_LENGTH    = 15
 TP_MULTIPLIER = 2.0          # TP = SL distance × 2
-MONTHS_BACK   = 9
+MONTHS_BACK   = 9            # script requests 9m; auto-caps to available data
 INITIAL_CAP   = 1000.0       # USDC starting capital
 RISK_PER_TRADE = 0.01        # 1 % risk per trade
-EXCHANGE_ID   = "binance"    # change to "bybit", "okx", etc. if needed
+
+# MON launched Oct 8 2025 — OKX lists MON/USDC spot.
+# Fallback chain: okx (MON/USDC) → bybit (MON/USDT) → gate (MON/USDT)
+EXCHANGE_ID   = "okx"
 
 # ══════════════════════════════════════════════
 # 1. FETCH DATA
 # ══════════════════════════════════════════════
 
-def fetch_ohlcv(symbol: str, timeframe: str, months: int) -> pd.DataFrame:
-    exchange = getattr(ccxt, EXCHANGE_ID)({"enableRateLimit": True})
+def _try_fetch(exchange_id: str, symbol: str, timeframe: str, since_ms: int) -> list:
+    """Try fetching all bars from one exchange, paginating as needed."""
+    exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True})
+    exchange.load_markets()
 
-    since_dt  = datetime.now(timezone.utc) - timedelta(days=months * 30)
-    since_ms  = int(since_dt.timestamp() * 1000)
-    limit     = 1000          # max per request for most exchanges
-    all_bars  = []
+    # Normalise symbol — try as-is, then without '/'
+    if symbol not in exchange.markets:
+        alt = symbol.replace("/", "")
+        if alt in exchange.markets:
+            symbol = alt
+        else:
+            raise ccxt.BadSymbol(f"{exchange_id}: symbol {symbol} not found")
 
-    print(f"[FETCH] {symbol} | {timeframe} | last {months} months …")
+    limit    = 1000
+    all_bars = []
+    cur_since = since_ms
 
     while True:
-        try:
-            bars = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
-        except ccxt.BadSymbol:
-            # Some exchanges list it differently
-            alt = symbol.replace("/", "")
-            print(f"[WARN] Symbol {symbol} not found, trying {alt} …")
-            bars = exchange.fetch_ohlcv(alt, timeframe, since=since_ms, limit=limit)
-
+        bars = exchange.fetch_ohlcv(symbol, timeframe, since=cur_since, limit=limit)
         if not bars:
             break
         all_bars.extend(bars)
-        since_ms = bars[-1][0] + 1
-        print(f"  …fetched {len(all_bars):,} bars", end="\r")
+        cur_since = bars[-1][0] + 1
+        print(f"  [{exchange_id}] …{len(all_bars):,} bars", end="\r")
         if len(bars) < limit:
             break
         time.sleep(exchange.rateLimit / 1000)
 
-    print()
+    return all_bars
+
+
+def fetch_ohlcv(symbol: str, timeframe: str, months: int) -> pd.DataFrame:
+    # MON launched Oct 8 2025 — cap lookback to what actually exists
+    since_dt  = datetime.now(timezone.utc) - timedelta(days=months * 30)
+    since_ms  = int(since_dt.timestamp() * 1000)
+
+    # Fallback chain: preferred exchange first, then alternatives
+    candidates = [
+        (EXCHANGE_ID, symbol),          # okx  + MON/USDC
+        ("bybit",     "MON/USDT"),      # bybit + MON/USDT (deepest liquidity)
+        ("gate",      "MON/USDT"),      # gate  + MON/USDT
+        ("kucoin",    "MON/USDT"),      # kucoin fallback
+    ]
+
+    all_bars = []
+    used_pair = symbol
+
+    for ex_id, sym in candidates:
+        try:
+            print(f"[FETCH] Trying {ex_id} | {sym} | {timeframe} | last {months} months …")
+            all_bars = _try_fetch(ex_id, sym, timeframe, since_ms)
+            used_pair = sym
+            print(f"\n[OK] Fetched from {ex_id} ({sym})")
+            break
+        except Exception as e:
+            print(f"\n[WARN] {ex_id}/{sym} failed: {e}")
+            continue
+
     if not all_bars:
-        raise ValueError(f"No data returned for {symbol}. Check symbol name / exchange.")
+        raise ValueError(
+            "Could not fetch MON data from any exchange.\n"
+            "Please check your internet connection or try again later."
+        )
 
     df = pd.DataFrame(all_bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df.set_index("timestamp", inplace=True)
     df.sort_index(inplace=True)
     df = df[~df.index.duplicated(keep="last")]
+    print(f"[INFO] Symbol traded: {used_pair} | Bars: {len(df):,}")
     return df
 
 # ══════════════════════════════════════════════
@@ -302,7 +337,7 @@ def send_telegram(stats: dict):
 ╚══════════════════════════════╝
 
 🕐 *Timeframe* : 1-Minute
-📅 *Period*    : {stats['date_from']} → {stats['date_to']} _(9 months)_
+📅 *Period*    : {stats['date_from']} → {stats['date_to']} _(9m window; MON launched Oct 8 2025)_
 🔢 *Strategy*  : RSI(40) × WMA(15) Crossover
 📌 *SL*        : Previous candle low/high
 🎯 *TP*        : 2× SL distance

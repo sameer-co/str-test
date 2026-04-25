@@ -72,17 +72,19 @@ def _try_fetch(exchange_id: str, symbol: str, timeframe: str, since_ms: int) -> 
     limit     = 1000
     all_bars  = []
     cur_since = since_ms
+    now_ms    = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    while True:
+    while cur_since < now_ms:
         bars = exchange.fetch_ohlcv(symbol, timeframe, since=cur_since, limit=limit)
         if not bars:
             break
         all_bars.extend(bars)
-        cur_since = bars[-1][0] + 1
-        print(f"  [{exchange_id}/{symbol}] …{len(all_bars):,} bars", end="\r")
-        if len(bars) < limit:
+        last_ts   = bars[-1][0]
+        cur_since = last_ts + 60_000   # advance exactly 1 minute past last bar
+        print(f"  [{exchange_id}/{symbol}] …{len(all_bars):,} bars  ({datetime.fromtimestamp(last_ts/1000, tz=timezone.utc).strftime('%Y-%m-%d')})", end="\r")
+        if last_ts >= now_ms:
             break
-        time.sleep(max(exchange.rateLimit / 1000, 0.2))
+        time.sleep(max(exchange.rateLimit / 1000, 0.3))
 
     # ⚠️  Treat empty response as a failure so the fallback chain can try next exchange
     if not all_bars:
@@ -103,10 +105,10 @@ def fetch_ohlcv(symbol: str, timeframe: str, months: int) -> pd.DataFrame:
 
     print(f"[INFO] Data window starts: {datetime.fromtimestamp(since_ms/1000, tz=timezone.utc).strftime('%Y-%m-%d')}")
 
-    # Fallback chain: preferred exchange first, then alternatives
+    # Fallback chain: Bybit first (full 1m history, reliable pagination)
     candidates = [
-        ("okx",    "MON/USDC"),   # OKX lists MON/USDC spot
-        ("bybit",  "MON/USDT"),   # Bybit — deepest liquidity
+        ("bybit",  "MON/USDT"),   # deepest liquidity, full history
+        ("okx",    "MON/USDC"),   # USDC pair
         ("gate",   "MON/USDT"),   # Gate.io
         ("kucoin", "MON/USDT"),   # KuCoin
     ]

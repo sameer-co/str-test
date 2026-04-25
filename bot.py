@@ -36,8 +36,8 @@ load_dotenv()  # optional: load TELEGRAM_TOKEN and TELEGRAM_CHAT_ID from .env
 # ══════════════════════════════════════════════
 # ⚙️  CONFIGURATION  — edit these
 # ══════════════════════════════════════════════
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN",   "YOUR_BOT_TOKEN_HERE")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN",   "8349229275:AAGNWV2A0_Pf9LhlwZCczeBoMcUaJL2shFg")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1950462171")
 
 SYMBOL        = "MON/USDC"
 TIMEFRAME     = "1m"
@@ -69,8 +69,8 @@ def _try_fetch(exchange_id: str, symbol: str, timeframe: str, since_ms: int) -> 
         else:
             raise ccxt.BadSymbol(f"{exchange_id}: symbol {symbol} not found")
 
-    limit    = 1000
-    all_bars = []
+    limit     = 1000
+    all_bars  = []
     cur_since = since_ms
 
     while True:
@@ -79,45 +79,58 @@ def _try_fetch(exchange_id: str, symbol: str, timeframe: str, since_ms: int) -> 
             break
         all_bars.extend(bars)
         cur_since = bars[-1][0] + 1
-        print(f"  [{exchange_id}] …{len(all_bars):,} bars", end="\r")
+        print(f"  [{exchange_id}/{symbol}] …{len(all_bars):,} bars", end="\r")
         if len(bars) < limit:
             break
-        time.sleep(exchange.rateLimit / 1000)
+        time.sleep(max(exchange.rateLimit / 1000, 0.2))
+
+    # ⚠️  Treat empty response as a failure so the fallback chain can try next exchange
+    if not all_bars:
+        raise ValueError(f"{exchange_id}/{symbol}: API returned 0 bars for the requested window")
 
     return all_bars
 
 
 def fetch_ohlcv(symbol: str, timeframe: str, months: int) -> pd.DataFrame:
-    # MON launched Oct 8 2025 — cap lookback to what actually exists
-    since_dt  = datetime.now(timezone.utc) - timedelta(days=months * 30)
-    since_ms  = int(since_dt.timestamp() * 1000)
+    # MON launched ~Oct 8 2025 — use that as the hard floor so exchanges
+    # don't return empty pages for a "9 months ago" timestamp that predates listing.
+    MON_LAUNCH_MS = 1728345600000  # 2025-10-08 00:00:00 UTC in milliseconds
+
+    requested_since = datetime.now(timezone.utc) - timedelta(days=months * 30)
+    requested_ms    = int(requested_since.timestamp() * 1000)
+    # Use whichever is later: the requested lookback OR the token launch date
+    since_ms = max(requested_ms, MON_LAUNCH_MS)
+
+    print(f"[INFO] Data window starts: {datetime.fromtimestamp(since_ms/1000, tz=timezone.utc).strftime('%Y-%m-%d')}")
 
     # Fallback chain: preferred exchange first, then alternatives
     candidates = [
-        (EXCHANGE_ID, symbol),          # okx  + MON/USDC
-        ("bybit",     "MON/USDT"),      # bybit + MON/USDT (deepest liquidity)
-        ("gate",      "MON/USDT"),      # gate  + MON/USDT
-        ("kucoin",    "MON/USDT"),      # kucoin fallback
+        ("okx",    "MON/USDC"),   # OKX lists MON/USDC spot
+        ("bybit",  "MON/USDT"),   # Bybit — deepest liquidity
+        ("gate",   "MON/USDT"),   # Gate.io
+        ("kucoin", "MON/USDT"),   # KuCoin
     ]
 
-    all_bars = []
+    all_bars  = []
     used_pair = symbol
+    used_exch = EXCHANGE_ID
 
     for ex_id, sym in candidates:
         try:
-            print(f"[FETCH] Trying {ex_id} | {sym} | {timeframe} | last {months} months …")
-            all_bars = _try_fetch(ex_id, sym, timeframe, since_ms)
+            print(f"[FETCH] Trying {ex_id} | {sym} | {timeframe} …")
+            all_bars  = _try_fetch(ex_id, sym, timeframe, since_ms)
             used_pair = sym
-            print(f"\n[OK] Fetched from {ex_id} ({sym})")
+            used_exch = ex_id
+            print(f"\n[OK] {len(all_bars):,} bars from {ex_id} ({sym})")
             break
         except Exception as e:
-            print(f"\n[WARN] {ex_id}/{sym} failed: {e}")
+            print(f"\n[WARN] {ex_id}/{sym} → {e}")
             continue
 
     if not all_bars:
         raise ValueError(
             "Could not fetch MON data from any exchange.\n"
-            "Please check your internet connection or try again later."
+            "All attempted exchanges returned no data — check network access."
         )
 
     df = pd.DataFrame(all_bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -125,7 +138,7 @@ def fetch_ohlcv(symbol: str, timeframe: str, months: int) -> pd.DataFrame:
     df.set_index("timestamp", inplace=True)
     df.sort_index(inplace=True)
     df = df[~df.index.duplicated(keep="last")]
-    print(f"[INFO] Symbol traded: {used_pair} | Bars: {len(df):,}")
+    print(f"[INFO] Exchange: {used_exch} | Pair: {used_pair} | Total bars: {len(df):,}")
     return df
 
 # ══════════════════════════════════════════════

@@ -43,10 +43,10 @@ SYMBOL        = "MON/USDC"
 TIMEFRAME     = "1m"
 RSI_LENGTH    = 40
 WMA_LENGTH    = 15
-TP_MULTIPLIER = 2.0          # TP = SL distance × 2
+TP_MULTIPLIER = 1.5         # TP = SL distance × 2
 MONTHS_BACK   = 9            # script requests 9m; auto-caps to available data
 INITIAL_CAP   = 1000.0       # USDC starting capital
-RISK_PER_TRADE = 0.01        # 1 % risk per trade
+RISK_PER_TRADE = 0.02        # 1 % risk per trade
 
 # MON launched Oct 8 2025 — OKX lists MON/USDC spot.
 # Fallback chain: okx (MON/USDC) → bybit (MON/USDT) → gate (MON/USDT)
